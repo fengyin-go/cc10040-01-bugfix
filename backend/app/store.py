@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from app.seed import SEED_ROWS
 
@@ -118,6 +118,19 @@ class Store:
     def cache_set(self, key: str, value: Any, ttl: int) -> None:
         """设置缓存，ttl 单位为秒。"""
         self._cache[key] = (time.time() + ttl, value)
+
+    def cache_set_guarded(self, key: str, value: Any, ttl: int,
+                          condition: Callable[[], bool]) -> bool:
+        """在锁内校验 condition 成立才写入缓存，返回是否写入。
+
+        用于并发预热的迟到写保护：计算完成时若口径已切换，
+        condition 不成立，旧口径结果直接丢弃，不覆盖有效明细。
+        """
+        with self._lock:
+            if not condition():
+                return False
+            self._cache[key] = (time.time() + ttl, value)
+            return True
 
     def cache_invalidate(self, key: str) -> bool:
         return self._cache.pop(key, None) is not None

@@ -2,14 +2,15 @@
 
 跨模块数据流: data_service/query_builder -> cache_layer -> query_journal
 当口径版本变更或数据更新时触发缓存失效。
+预热委托查询构建器做完整计算，缓存的明细与正式执行一致。
 """
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from app.store import store
 from app.services.base import BaseModuleService
+from app.services.query_builder import QueryBuilderService
 
 
 class CacheLayerService(BaseModuleService):
@@ -68,22 +69,49 @@ class CacheLayerService(BaseModuleService):
         }
 
     def warm_cache(self, metric_name: str) -> dict[str, Any]:
-        """预热缓存：提前计算并缓存指标查询结果。
+        """预热缓存：对指标下已发布模板做完整计算并缓存查询明细。
 
         跨模块数据流: cache_layer -> query_builder (pre-execute and cache)
+        预热写入的是与正式执行一致的完整明细（口径版本、统计粒度、维度列），
+        按模板关联缓存策略配置的缓存时长失效；后台预热不写查询日志。
         """
         templates = store.find_by_field("query_builder", "关联指标", metric_name)
+        builder = QueryBuilderService()
         warmed = 0
+        outcomes = []
         for tmpl in templates:
             if tmpl.get("status") == "已发布":
-                cache_key = f"query:{metric_name}:{tmpl.get('维度组合','')}:{tmpl.get('过滤条件','')}"
-                # 生成预热数据
-                metric_rows = store.find_by_field("metric_definition", "指标名称", metric_name)
-                pre_data = [{"序号": i+1, "指标": metric_name,
-                             "预热": True} for i in range(len(metric_rows))]
-                cache_ttl = 300
-                if "长期" in str(tmpl.get("缓存策略", "")):
-                    cache_ttl = 3600
-                store.cache_set(cache_key, pre_data, cache_ttl)
-                warmed += 1
-        return {"metric": metric_name, "warmed_templates": warmed}
+                outcome = builder.warm_template(int(tmpl.get("id", 0)))
+                outcomes.append(outcome)
+                if outcome.get("warmed"):
+                    warmed += 1
+        return {"metric": metric_name, "warmed_templates": warmed,
+                "templates": outcomes}
+
+    def warm_by_strategy(self, strategy_id: int) -> dict[str, Any]:
+        """从缓存策略列表发起预热：按策略关联的查询模板预热。
+
+        预热结果按策略配置的缓存时长失效。
+        """
+        strategy = store.find(self.MODULE, strategy_id)
+        if strategy is None:
+            return {"error": f"缓存策略 {strategy_id} 不存在"}
+        template = self._resolve_strategy_template(strategy)
+        if template is None:
+            return {"error": f"缓存策略 {strategy_id} 未关联有效的查询模板"}
+        outcome = QueryBuilderService().warm_template(int(template.get("id", 0)))
+        return {"strategy_id": strategy_id,
+                "template_id": template.get("id"),
+                "metric": template.get("关联指标", ""),
+                **outcome}
+
+    @staticmethod
+    def _resolve_strategy_template(strategy: dict[str, Any]) -> dict[str, Any] | None:
+        """按策略的「关联查询模板」定位模板，支持模板名称或模板ID。"""
+        ref = str(strategy.get("关联查询模板", "")).strip()
+        if not ref:
+            return None
+        for tmpl in store.rows("query_builder"):
+            if ref in (str(tmpl.get("id", "")), str(tmpl.get("模板名称", ""))):
+                return tmpl
+        return None

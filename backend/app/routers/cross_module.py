@@ -95,6 +95,13 @@ def warm_cache(metric_name: str):
     return svc.warm_cache(metric_name)
 
 
+@router.post("/cache/strategy/{strategy_id}/warm")
+def warm_cache_by_strategy(strategy_id: int):
+    """从缓存策略列表发起预热：按策略关联模板完整计算并缓存查询明细"""
+    svc = CacheLayerService()
+    return svc.warm_by_strategy(strategy_id)
+
+
 @router.get("/cache/stats")
 def cache_stats():
     """获取缓存统计"""
